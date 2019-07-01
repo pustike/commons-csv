@@ -21,11 +21,11 @@
     <parent>
         <groupId>io.github.pustike</groupId>
         <artifactId>pustike-maven-parent</artifactId>
-        <version>0.1.0</version>
+        <version>0.1.2</version>
     </parent>
 
     <artifactId>commons-csv</artifactId>
-    <version>1.6.0</version>
+    <version>1.7.0</version>
 
     <name>Apache Commons CSV</name>
     <description>The Apache Commons CSV library provides a simple interface for reading and writing

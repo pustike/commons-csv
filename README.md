@@ -16,13 +16,13 @@ To add a dependency using Maven, use the following:
 <dependency>
     <groupId>io.github.pustike</groupId>
     <artifactId>commons-csv</artifactId>
-    <version>1.6.0</version>
+    <version>1.7.0</version>
 </dependency>
 ```
 To add a dependency using Gradle:
 ```
 dependencies {
-    compile 'io.github.pustike:commons-csv:1.6.0'
+    compile 'io.github.pustike:commons-csv:1.7.0'
 }
 ```
 Or, download the [latest JAR](https://search.maven.org/remote_content?g=io.github.pustike&a=commons-csv&v=LATEST)

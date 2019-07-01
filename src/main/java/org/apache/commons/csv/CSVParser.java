@@ -33,6 +33,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -133,6 +134,55 @@ import java.util.TreeMap;
  * @see <a href="package-summary.html">package documentation for more details</a>
  */
 public final class CSVParser implements Iterable<CSVRecord>, Closeable {
+
+    class CSVRecordIterator implements Iterator<CSVRecord> {
+        private CSVRecord current;
+
+        private CSVRecord getNextRecord() {
+            try {
+                return CSVParser.this.nextRecord();
+            } catch (final IOException e) {
+                throw new IllegalStateException(
+                        e.getClass().getSimpleName() + " reading next record: " + e.toString(), e);
+            }
+        }
+
+        @Override
+        public boolean hasNext() {
+            if (CSVParser.this.isClosed()) {
+                return false;
+            }
+            if (this.current == null) {
+                this.current = this.getNextRecord();
+            }
+
+            return this.current != null;
+        }
+
+        @Override
+        public CSVRecord next() {
+            if (CSVParser.this.isClosed()) {
+                throw new NoSuchElementException("CSVParser has been closed");
+            }
+            CSVRecord next = this.current;
+            this.current = null;
+
+            if (next == null) {
+                // hasNext() wasn't called before
+                next = this.getNextRecord();
+                if (next == null) {
+                    throw new NoSuchElementException("No more CSV records available");
+                }
+            }
+
+            return next;
+        }
+
+        @Override
+        public void remove() {
+            throw new UnsupportedOperationException();
+        }
+    }
 
     /**
      * Creates a parser for the given {@link File}.
@@ -249,6 +299,8 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
         return new CSVParser(new StringReader(string), format);
     }
 
+    // the following objects are shared to reduce garbage
+
     /**
      * Creates a parser for the given URL.
      *
@@ -276,12 +328,13 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
         return new CSVParser(new InputStreamReader(url.openStream(), charset), format);
     }
 
-    // the following objects are shared to reduce garbage
-
     private final CSVFormat format;
 
     /** A mapping of column names to column indices */
     private final Map<String, Integer> headerMap;
+
+    /** The column order to avoid re-computing it. */
+    private final List<String> headerNames;
 
     private final Lexer lexer;
 
@@ -350,11 +403,14 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
     public CSVParser(final Reader reader, final CSVFormat format, final long characterOffset, final long recordNumber)
             throws IOException {
         Objects.requireNonNull(reader, "Parameter 'reader' must not be null!");
+        Objects.requireNonNull(format, "Parameter 'format' must not be null!");
 
         this.format = Objects.requireNonNull(format, "Parameter 'format' must not be null!");
         this.lexer = new Lexer(format, new ExtendedBufferedReader(reader));
         this.csvRecordIterator = new CSVRecordIterator();
-        this.headerMap = this.initializeHeader();
+        final Headers headers = createHeaders();
+        this.headerMap = headers.headerMap;
+        this.headerNames = headers.headerNames;
         this.characterOffset = characterOffset;
         this.recordNumber = recordNumber - 1;
     }
@@ -382,6 +438,94 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
         }
     }
 
+    private Map<String, Integer> createEmptyHeaderMap() {
+        return this.format.getIgnoreHeaderCase() ?
+                new TreeMap<>(String.CASE_INSENSITIVE_ORDER) :
+                new LinkedHashMap<>();
+    }
+
+    /**
+     * Header information based on name and position.
+     */
+    private static final class Headers {
+        /**
+         * Header column positions (0-based)
+         */
+        final Map<String, Integer> headerMap;
+
+        /**
+         * Header names in column order
+         */
+        final List<String> headerNames;
+
+        Headers(final Map<String, Integer> headerMap, final List<String> headerNames) {
+            this.headerMap = headerMap;
+            this.headerNames = headerNames;
+        }
+    }
+
+    /**
+     * Creates the name to index mapping if the format defines a header.
+     *
+     * @return null if the format has no header.
+     * @throws IOException if there is a problem reading the header or skipping the first record
+     */
+    private Headers createHeaders() throws IOException {
+        Map<String, Integer> hdrMap = null;
+        List<String> headerNames = null;
+        final String[] formatHeader = this.format.getHeader();
+        if (formatHeader != null) {
+            hdrMap = createEmptyHeaderMap();
+            String[] headerRecord = null;
+            if (formatHeader.length == 0) {
+                // read the header from the first line of the file
+                final CSVRecord nextRecord = this.nextRecord();
+                if (nextRecord != null) {
+                    headerRecord = nextRecord.values();
+                }
+            } else {
+                if (this.format.getSkipHeaderRecord()) {
+                    this.nextRecord();
+                }
+                headerRecord = formatHeader;
+            }
+
+            // build the name to index mappings
+            if (headerRecord != null) {
+                for (int i = 0; i < headerRecord.length; i++) {
+                    final String header = headerRecord[i];
+                    final boolean containsHeader = header != null && hdrMap.containsKey(header);
+                    final boolean emptyHeader = header == null || header.trim().isEmpty();
+                    if (containsHeader) {
+                        if (!emptyHeader && !this.format.getAllowDuplicateHeaderNames()) {
+                            throw new IllegalArgumentException(
+                                String.format(
+                                    "The header contains a duplicate name: \"%s\" in %s. If this is valid then use CSVFormat.withAllowDuplicateHeaderNames().",
+                                    header, Arrays.toString(headerRecord)));
+                        }
+                        if (emptyHeader && !this.format.getAllowMissingColumnNames()) {
+                            throw new IllegalArgumentException(
+                                    "A header name is missing in " + Arrays.toString(headerRecord));
+                        }
+                    }
+                    if (header != null) {
+                        hdrMap.put(header, i);
+                        if (headerNames == null) {
+                            headerNames = new ArrayList<>(headerRecord.length);
+                        }
+                        headerNames.add(header);
+                    }
+                }
+            }
+        }
+        if (headerNames == null) {
+            headerNames = Collections.emptyList(); //immutable
+        } else {
+            headerNames = Collections.unmodifiableList(headerNames);
+        }
+        return new Headers(hdrMap, headerNames);
+    }
+
     /**
      * Returns the current line number in the input stream.
      *
@@ -407,14 +551,38 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
     }
 
     /**
-     * Returns a copy of the header map that iterates in column order.
+     * Returns a copy of the header map.
      * <p>
      * The map keys are column names. The map values are 0-based indices.
      * </p>
-     * @return a copy of the header map that iterates in column order.
+     * @return a copy of the header map.
      */
     public Map<String, Integer> getHeaderMap() {
-        return this.headerMap == null ? null : new LinkedHashMap<>(this.headerMap);
+        if (this.headerMap == null) {
+            return null;
+        }
+        final Map<String, Integer> map = createEmptyHeaderMap();
+        map.putAll(this.headerMap);
+        return map;
+    }
+
+    /**
+     * Returns the header map.
+     *
+     * @return the header map.
+     */
+    Map<String, Integer> getHeaderMapRaw() {
+        return this.headerMap;
+    }
+
+    /**
+     * Returns a read-only list of header names that iterates in column order.
+     *
+     * @return read-only list of header names that iterates in column order.
+     * @since 1.7
+     */
+    public List<String> getHeaderNames() {
+        return headerNames;
     }
 
     /**
@@ -453,51 +621,6 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
     }
 
     /**
-     * Initializes the name to index mapping if the format defines a header.
-     *
-     * @return null if the format has no header.
-     * @throws IOException if there is a problem reading the header or skipping the first record
-     */
-    private Map<String, Integer> initializeHeader() throws IOException {
-        Map<String, Integer> hdrMap = null;
-        final String[] formatHeader = this.format.getHeader();
-        if (formatHeader != null) {
-            hdrMap = this.format.getIgnoreHeaderCase() ?
-                    new TreeMap<String, Integer>(String.CASE_INSENSITIVE_ORDER) :
-                    new LinkedHashMap<String, Integer>();
-
-            String[] headerRecord = null;
-            if (formatHeader.length == 0) {
-                // read the header from the first line of the file
-                final CSVRecord nextRecord = this.nextRecord();
-                if (nextRecord != null) {
-                    headerRecord = nextRecord.values();
-                }
-            } else {
-                if (this.format.getSkipHeaderRecord()) {
-                    this.nextRecord();
-                }
-                headerRecord = formatHeader;
-            }
-
-            // build the name to index mappings
-            if (headerRecord != null) {
-                for (int i = 0; i < headerRecord.length; i++) {
-                    final String header = headerRecord[i];
-                    final boolean containsHeader = hdrMap.containsKey(header);
-                    final boolean emptyHeader = header == null || header.trim().isEmpty();
-                    if (containsHeader && (!emptyHeader || !this.format.getAllowMissingColumnNames())) {
-                        throw new IllegalArgumentException("The header contains a duplicate name: \"" + header +
-                                "\" in " + Arrays.toString(headerRecord));
-                    }
-                    hdrMap.put(header, i);
-                }
-            }
-        }
-        return hdrMap;
-    }
-
-    /**
      * Gets whether this parser is closed.
      *
      * @return whether this parser is closed.
@@ -522,55 +645,6 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
     public Iterator<CSVRecord> iterator() {
         return csvRecordIterator;
     }
-
-    class CSVRecordIterator implements Iterator<CSVRecord> {
-        private CSVRecord current;
-
-        private CSVRecord getNextRecord() {
-            try {
-                return CSVParser.this.nextRecord();
-            } catch (final IOException e) {
-                throw new IllegalStateException(
-                        e.getClass().getSimpleName() + " reading next record: " + e.toString(), e);
-            }
-        }
-
-        @Override
-        public boolean hasNext() {
-            if (CSVParser.this.isClosed()) {
-                return false;
-            }
-            if (this.current == null) {
-                this.current = this.getNextRecord();
-            }
-
-            return this.current != null;
-        }
-
-        @Override
-        public CSVRecord next() {
-            if (CSVParser.this.isClosed()) {
-                throw new NoSuchElementException("CSVParser has been closed");
-            }
-            CSVRecord next = this.current;
-            this.current = null;
-
-            if (next == null) {
-                // hasNext() wasn't called before
-                next = this.getNextRecord();
-                if (next == null) {
-                    throw new NoSuchElementException("No more CSV records available");
-                }
-            }
-
-            return next;
-        }
-
-        @Override
-        public void remove() {
-            throw new UnsupportedOperationException();
-        }
-    };
 
     /**
      * Parses the next record from the current point in the stream.
@@ -618,8 +692,8 @@ public final class CSVParser implements Iterable<CSVRecord>, Closeable {
         if (!this.recordList.isEmpty()) {
             this.recordNumber++;
             final String comment = sb == null ? null : sb.toString();
-            result = new CSVRecord(this.recordList.toArray(new String[this.recordList.size()]), this.headerMap, comment,
-                    this.recordNumber, startCharPosition);
+            result = new CSVRecord(this, this.recordList.toArray(new String[0]),
+                comment, this.recordNumber, startCharPosition);
         }
         return result;
     }
